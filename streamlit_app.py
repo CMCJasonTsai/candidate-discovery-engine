@@ -251,11 +251,18 @@ with tab1:
         d.metric("A-R 高風險", f"{(result['研究優先度']=='A-R｜高風險候選').sum()} 檔")
         e.metric("B級候選", f"{result['研究優先度'].str.startswith('B').sum()} 檔")
 
+        chip_cov = (pd.to_numeric(result.get("籌碼完整度%", 0), errors="coerce").fillna(0) > 0).mean() * 100
+        rev_cov = (pd.to_numeric(result.get("營收完整度%", 0), errors="coerce").fillna(0) > 0).mean() * 100
+        x1,x2,x3 = st.columns(3)
+        x1.metric("籌碼資料覆蓋率", f"{chip_cov:.1f}%")
+        x2.metric("月營收資料覆蓋率", f"{rev_cov:.1f}%")
+        x3.metric("模型版本", "v1.2")
+
         cols = ["排名","市場","代碼","名稱","現價","候選分數","研究優先度","風險等級","候選型態","趨勢","動能","價量","籌碼","營收動能","流動性","風險","估值","外資淨買超/成交量%","投信淨買超/成交量%","月營收YoY%","累計營收YoY%","ROC20%","RSI14","RVOL5/20","ATR14%","60D最大回撤%","20D日均成交金額(百萬)"]
         st.dataframe(filtered[cols], hide_index=True, use_container_width=True)
 
         st.download_button("⬇️ 下載完整候選 CSV", result.to_csv(index=False).encode("utf-8-sig"),
-                           file_name=f"candidate_discovery_v1_1_{datetime.now():%Y%m%d_%H%M}.csv", mime="text/csv")
+                           file_name=f"candidate_discovery_v1_2_{datetime.now():%Y%m%d_%H%M}.csv", mime="text/csv")
 
 with tab2:
     st.subheader("Opportunity × Risk 雙軸判讀")
