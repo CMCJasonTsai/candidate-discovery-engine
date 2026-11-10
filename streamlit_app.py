@@ -9,11 +9,11 @@ import pandas as pd
 import streamlit as st
 
 from src.candidate_engine import HORIZON_CFG, load_market_snapshot, load_valuation, run_engine
-from src.market_factors import load_institutional_snapshot, load_revenue_snapshot
+from src.market_factors import load_institutional_snapshot, load_revenue_snapshot, load_factor_features
 
 st.set_page_config(page_title="Candidate Discovery Engine", page_icon="📈", layout="wide", initial_sidebar_state="expanded")
 
-APP_BUILD = "1.2.0"
+APP_BUILD = "1.3.0"
 if st.session_state.get("_app_build") != APP_BUILD:
     st.cache_data.clear()
     st.session_state.pop("last_result", None)
@@ -55,7 +55,7 @@ def cached_revenue():
     return load_revenue_snapshot()
 
 @st.cache_data(ttl=1800, show_spinner=False)
-def cached_run_v120(universe_json, horizon, deep_scan_n, min_avg_amount, engine_version="1.2.0"):
+def cached_run_v130(universe_json, horizon, deep_scan_n, min_avg_amount, engine_version="1.3.0"):
     """Versioned cache key prevents old v1.0 DataFrames from surviving engine upgrades."""
     universe = pd.read_json(StringIO(universe_json), orient="split")
     result, _ = run_engine(universe, horizon, deep_scan_n, min_avg_amount)
@@ -141,7 +141,7 @@ def ensure_v12_schema(df: pd.DataFrame, horizon: str) -> pd.DataFrame:
     return out
 
 st.title("📈 全市場 Candidate Discovery Engine")
-st.caption("Web App v1.2｜技術 × 價量 × 法人籌碼 × 月營收 × 風險｜研究排序工具")
+st.caption("Web App v1.3｜Historical Factor Store｜5D/20D 籌碼 × 3M/6M 營收 × 風險｜研究排序工具")
 
 with st.sidebar:
     st.header("候選篩選條件")
@@ -198,6 +198,10 @@ else:
     for col in ["revenue_period","revenue_current_thousand","revenue_mom_pct","revenue_yoy_pct","revenue_cum_yoy_pct","revenue_source"]:
         snapshot[col] = np.nan
 
+hist_feat = load_factor_features()
+if not hist_feat.empty:
+    snapshot = snapshot.merge(hist_feat, on=["market","code"], how="left")
+
 date_col = "date_display" if "date_display" in snapshot.columns else "date"
 market_dates = "、".join([x for x in sorted(set(snapshot[date_col].astype(str))) if x][:3])
 
@@ -223,8 +227,8 @@ tab1,tab2,tab3,tab4,tab5 = st.tabs(["🏆 候選排行","⚖️ 機會×風險",
 
 result = None
 if run and not universe.empty:
-    with st.spinner("正在抓取歷史價量、法人籌碼與月營收並計算 v1.2 候選分數…"):
-        result = cached_run_v120(universe.to_json(orient="split"), horizon, deep_scan_n, min_amount_m*1_000_000, "1.2.0")
+    with st.spinner("正在計算 v1.3：歷史價量、5D/20D 籌碼與 3M/6M 營收趨勢…"):
+        result = cached_run_v130(universe.to_json(orient="split"), horizon, deep_scan_n, min_amount_m*1_000_000, "1.3.0")
     result = ensure_v12_schema(result, horizon)
     st.session_state["last_result"] = result
 elif "last_result" in st.session_state:
@@ -256,13 +260,16 @@ with tab1:
         x1,x2,x3 = st.columns(3)
         x1.metric("籌碼資料覆蓋率", f"{chip_cov:.1f}%")
         x2.metric("月營收資料覆蓋率", f"{rev_cov:.1f}%")
-        x3.metric("模型版本", "v1.2")
+        hist_cov = 0.0
+        if "籌碼模式" in result.columns:
+            hist_cov = (result["籌碼模式"].astype(str)=="5D/20D").mean()*100
+        x3.metric("歷史 Store 啟用率", f"{hist_cov:.1f}%")
 
-        cols = ["排名","市場","代碼","名稱","現價","候選分數","研究優先度","風險等級","候選型態","趨勢","動能","價量","籌碼","營收動能","流動性","風險","估值","外資淨買超/成交量%","投信淨買超/成交量%","月營收YoY%","累計營收YoY%","ROC20%","RSI14","RVOL5/20","ATR14%","60D最大回撤%","20D日均成交金額(百萬)"]
+        cols = ["排名","市場","代碼","名稱","現價","候選分數","研究優先度","風險等級","候選型態","籌碼模式","營收模式","趨勢","動能","價量","籌碼","營收動能","流動性","風險","估值","法人5D","法人20D","法人買超日數5D","營收YoY 3M平均%","營收YoY 6M平均%","營收3M加速度","外資淨買超/成交量%","投信淨買超/成交量%","ROC20%","ATR14%","60D最大回撤%"]
         st.dataframe(filtered[cols], hide_index=True, use_container_width=True)
 
         st.download_button("⬇️ 下載完整候選 CSV", result.to_csv(index=False).encode("utf-8-sig"),
-                           file_name=f"candidate_discovery_v1_2_{datetime.now():%Y%m%d_%H%M}.csv", mime="text/csv")
+                           file_name=f"candidate_discovery_v1_3_{datetime.now():%Y%m%d_%H%M}.csv", mime="text/csv")
 
 with tab2:
     st.subheader("Opportunity × Risk 雙軸判讀")
@@ -312,4 +319,4 @@ with tab5:
 """)
 
 st.divider()
-st.caption("Candidate Discovery Engine Web App v1.2｜Technical × Chip × Revenue × Risk｜建議持續以 Walk-Forward / OOS Evidence 校準。")
+st.caption("Candidate Discovery Engine Web App v1.3｜Historical Factor Store｜建議以 Walk-Forward / OOS Evidence 驗證 5D/20D 籌碼與 3M/6M Revenue Trend。")
