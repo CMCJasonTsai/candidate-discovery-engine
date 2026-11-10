@@ -12,6 +12,12 @@ from src.candidate_engine import HORIZON_CFG, load_market_snapshot, load_valuati
 
 st.set_page_config(page_title="Candidate Discovery Engine", page_icon="📈", layout="wide", initial_sidebar_state="expanded")
 
+APP_BUILD = "1.1.2"
+if st.session_state.get("_app_build") != APP_BUILD:
+    st.cache_data.clear()
+    st.session_state.pop("last_result", None)
+    st.session_state["_app_build"] = APP_BUILD
+
 def check_access():
     try:
         expected = st.secrets.get("APP_ACCESS_CODE", "")
@@ -40,11 +46,80 @@ def cached_valuation():
     return load_valuation()
 
 @st.cache_data(ttl=1800, show_spinner=False)
-def cached_run_v11(universe_json, horizon, deep_scan_n, min_avg_amount, engine_version="1.1.1"):
+def cached_run_v112(universe_json, horizon, deep_scan_n, min_avg_amount, engine_version="1.1.2"):
     """Versioned cache key prevents old v1.0 DataFrames from surviving engine upgrades."""
     universe = pd.read_json(StringIO(universe_json), orient="split")
     result, _ = run_engine(universe, horizon, deep_scan_n, min_avg_amount)
     return result
+
+
+def ensure_v11_schema(df: pd.DataFrame, horizon: str) -> pd.DataFrame:
+    """Make the UI tolerant of stale v1.0 cached DataFrames."""
+    if df is None or df.empty:
+        return df
+    out = df.copy()
+
+    if "風險等級" not in out.columns:
+        def _risk(row):
+            atr = pd.to_numeric(row.get("ATR14%", np.nan), errors="coerce")
+            mdd = abs(pd.to_numeric(row.get("60D最大回撤%", np.nan), errors="coerce"))
+            atr = 99 if pd.isna(atr) else float(atr)
+            mdd = 99 if pd.isna(mdd) else float(mdd)
+            if horizon.startswith("短"):
+                if atr >= 10 or mdd >= 30: return "Extreme"
+                if atr >= 8 or mdd >= 24: return "High"
+                if atr >= 6 or mdd >= 18: return "Medium"
+                return "Low"
+            if horizon.startswith("中"):
+                if atr >= 10 or mdd >= 28: return "Extreme"
+                if atr >= 8 or mdd >= 20: return "High"
+                if atr >= 4.5 or mdd >= 15: return "Medium"
+                return "Low"
+            if atr >= 8 or mdd >= 30: return "Extreme"
+            if atr >= 6 or mdd >= 24: return "High"
+            if atr >= 4.5 or mdd >= 18: return "Medium"
+            return "Low"
+        out["風險等級"] = out.apply(_risk, axis=1)
+
+    if "研究優先度" not in out.columns:
+        def _priority(row):
+            score = float(row.get("候選分數", 0))
+            risk = row.get("風險等級", "Extreme")
+            if score >= 80:
+                if risk == "Low": return "A1｜優先研究"
+                if risk == "Medium": return "A2｜積極觀察"
+                return "A-R｜高風險候選"
+            if score >= 70: return "B｜候選"
+            if score >= 60: return "C｜觀察"
+            return "D｜暫不列入"
+        out["研究優先度"] = out.apply(_priority, axis=1)
+
+    if "候選型態" not in out.columns:
+        def _ctype(row):
+            trend = float(row.get("趨勢", 0))
+            momentum = float(row.get("動能", 0))
+            volume = float(row.get("價量", 0))
+            risk_score = float(row.get("風險", 0))
+            risk = row.get("風險等級", "Extreme")
+            if risk in ("High","Extreme") and momentum >= 75: return "高風險動能"
+            if trend >= 70 and momentum >= 75 and volume >= 70: return "動能突破"
+            if trend >= 70 and risk_score >= 75 and volume < 70: return "穩健趨勢"
+            if volume >= 75 and momentum >= 60: return "價量轉強"
+            if risk_score >= 85 and momentum < 65: return "防守型"
+            return "綜合型"
+        out["候選型態"] = out.apply(_ctype, axis=1)
+
+    if "RVOL5/20" not in out.columns:
+        out["RVOL5/20"] = out["RVOL20"] if "RVOL20" in out.columns else np.nan
+
+    if "估值完整度%" not in out.columns:
+        cols = [x for x in ["PE","PB","殖利率%"] if x in out.columns]
+        if cols:
+            out["估值完整度%"] = out[cols].notna().sum(axis=1) / 3.0 * 100
+        else:
+            out["估值完整度%"] = 0.0
+
+    return out
 
 st.title("📈 全市場 Candidate Discovery Engine")
 st.caption("Web App v1.1｜TWSE＋TPEx｜機會分數 × 風險分級 × 候選型態｜研究排序工具")
@@ -111,12 +186,13 @@ tab1,tab2,tab3,tab4,tab5 = st.tabs(["🏆 候選排行","⚖️ 機會×風險",
 result = None
 if run and not universe.empty:
     with st.spinner("正在抓取歷史價量並計算 v1.1 候選分數…"):
-        result = cached_run_v11(universe.to_json(orient="split"), horizon, deep_scan_n, min_amount_m*1_000_000, "1.1.1")
+        result = cached_run_v112(universe.to_json(orient="split"), horizon, deep_scan_n, min_amount_m*1_000_000, "1.1.2")
+    result = ensure_v11_schema(result, horizon)
     st.session_state["last_result"] = result
 elif "last_result" in st.session_state:
     cached_session = st.session_state["last_result"]
     if isinstance(cached_session, pd.DataFrame) and "研究優先度" in cached_session.columns:
-        result = cached_session
+        result = ensure_v11_schema(cached_session, horizon)
     else:
         st.session_state.pop("last_result", None)
 
