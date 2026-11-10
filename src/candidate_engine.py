@@ -7,7 +7,7 @@ import pandas as pd
 import requests
 import yfinance as yf
 
-from src.market_factors import score_chip, score_revenue
+from src.market_factors import score_chip, score_revenue, score_chip_history, score_revenue_history
 
 TWSE_DAILY = "https://openapi.twse.com.tw/v1/exchangeReport/STOCK_DAY_ALL"
 TWSE_VAL = "https://openapi.twse.com.tw/v1/exchangeReport/BWIBBU_ALL"
@@ -15,7 +15,7 @@ TPEX_DAILY = "https://www.tpex.org.tw/openapi/v1/tpex_mainboard_daily_close_quot
 TPEX_VAL = "https://www.tpex.org.tw/openapi/v1/tpex_mainboard_peratio_analysis"
 
 HEADERS = {
-    "User-Agent": "Mozilla/5.0 CandidateDiscoveryEngine/1.2",
+    "User-Agent": "Mozilla/5.0 CandidateDiscoveryEngine/1.3",
     "Accept": "application/json,text/plain,*/*",
 }
 
@@ -504,14 +504,35 @@ def run_engine(universe: pd.DataFrame, horizon: str, deep_scan_n: int, min_avg_a
         yld = row.get("yield_pct", np.nan)
         valuation, valuation_raw, completeness = score_valuation(pe, pb, yld)
 
-        chip_score, foreign_ratio, trust_ratio, inst_total_ratio, chip_complete = score_chip(
+        chip_current, foreign_ratio, trust_ratio, inst_total_ratio, chip_complete_current = score_chip(
             row.get("foreign_net", np.nan), row.get("trust_net", np.nan),
             row.get("inst_total_net", np.nan), row.get("volume", np.nan)
         )
-        revenue_score, revenue_complete = score_revenue(
+        revenue_current, revenue_complete_current = score_revenue(
             row.get("revenue_mom_pct", np.nan), row.get("revenue_yoy_pct", np.nan),
             row.get("revenue_cum_yoy_pct", np.nan)
         )
+
+        chip_hist, chip_hist_complete = score_chip_history(row, row.get("volume", np.nan))
+        revenue_hist, revenue_hist_complete = score_revenue_history(row)
+
+        if chip_hist_complete >= 0.35:
+            chip_score = 0.75 * chip_hist + 0.25 * chip_current
+            chip_mode = "5D/20D"
+            chip_complete = max(chip_complete_current, chip_hist_complete)
+        else:
+            chip_score = chip_current
+            chip_mode = "單日"
+            chip_complete = chip_complete_current
+
+        if revenue_hist_complete >= 0.30:
+            revenue_score = 0.80 * revenue_hist + 0.20 * revenue_current
+            revenue_mode = "3M/6M"
+            revenue_complete = max(revenue_complete_current, revenue_hist_complete)
+        else:
+            revenue_score = revenue_current
+            revenue_mode = "單月"
+            revenue_complete = revenue_complete_current
 
         total = (
             trend*weights["trend"] + momentum*weights["momentum"] + volume*weights["volume"] +
@@ -528,6 +549,8 @@ def run_engine(universe: pd.DataFrame, horizon: str, deep_scan_n: int, min_avg_a
             "研究優先度": priority, "風險等級": risk, "候選型態": ctype,
             "趨勢": round(trend, 1), "動能": round(momentum, 1), "價量": round(volume, 1),
             "籌碼": round(chip_score, 1), "營收動能": round(revenue_score, 1),
+            "籌碼模式": chip_mode, "營收模式": revenue_mode,
+            "籌碼歷史分": round(chip_hist, 1), "營收歷史分": round(revenue_hist, 1),
             "流動性": round(liquidity, 1), "風險": round(risk_score, 1), "估值": round(valuation, 1),
             "外資淨買超/成交量%": None if not np.isfinite(foreign_ratio) else round(foreign_ratio, 2),
             "投信淨買超/成交量%": None if not np.isfinite(trust_ratio) else round(trust_ratio, 2),
@@ -537,6 +560,14 @@ def run_engine(universe: pd.DataFrame, horizon: str, deep_scan_n: int, min_avg_a
             "月營收YoY%": None if not np.isfinite(row.get("revenue_yoy_pct", np.nan)) else round(float(row.get("revenue_yoy_pct")), 2),
             "累計營收YoY%": None if not np.isfinite(row.get("revenue_cum_yoy_pct", np.nan)) else round(float(row.get("revenue_cum_yoy_pct")), 2),
             "營收完整度%": round(revenue_complete*100, 0),
+            "法人5D": None if not np.isfinite(row.get("total_5d", np.nan)) else round(float(row.get("total_5d")), 0),
+            "法人20D": None if not np.isfinite(row.get("total_20d", np.nan)) else round(float(row.get("total_20d")), 0),
+            "法人買超日數5D": None if not np.isfinite(row.get("inst_buy_days_5d", np.nan)) else int(row.get("inst_buy_days_5d")),
+            "法人買超日數20D": None if not np.isfinite(row.get("inst_buy_days_20d", np.nan)) else int(row.get("inst_buy_days_20d")),
+            "營收YoY 3M平均%": None if not np.isfinite(row.get("revenue_yoy_3m_avg", np.nan)) else round(float(row.get("revenue_yoy_3m_avg")), 2),
+            "營收YoY 6M平均%": None if not np.isfinite(row.get("revenue_yoy_6m_avg", np.nan)) else round(float(row.get("revenue_yoy_6m_avg")), 2),
+            "營收3M加速度": None if not np.isfinite(row.get("revenue_accel_3m", np.nan)) else round(float(row.get("revenue_accel_3m")), 2),
+            "營收正成長月數6M": None if not np.isfinite(row.get("revenue_positive_months_6", np.nan)) else int(row.get("revenue_positive_months_6")),
             "估值原始分": round(valuation_raw, 1), "估值完整度%": round(completeness*100, 0),
             "ROC5%": round(f["roc5"], 2), "ROC20%": round(f["roc20"], 2), "ROC60%": round(f["roc60"], 2),
             "RSI14": round(f["rsi14"], 1), "RVOL5/20": round(f["rvol5"], 2),
