@@ -123,63 +123,80 @@ def parse_twse_t86(payload, ymd: str) -> list[dict]:
 
 
 def parse_tpex_hist(payload, ymd: str) -> list[dict]:
-    if not isinstance(payload, dict):
+    """Parse both TPEx historical institutional schemas.
+
+    Legacy schema: tables[1], 16 columns.
+    Current schema: tables[0], 24 columns.
+    """
+    if not isinstance(payload, dict) or payload.get("stat") != "ok":
         return []
     tables = payload.get("tables") or []
-    candidates = []
-    for t in tables:
-        if not isinstance(t, dict):
-            continue
-        fields = t.get("fields")
-        data = t.get("data")
-        if isinstance(fields, list) and isinstance(data, list):
-            candidates.append((fields, data))
-    if not candidates and isinstance(payload.get("fields"), list) and isinstance(payload.get("data"), list):
-        candidates.append((payload["fields"], payload["data"]))
 
-    alias = {
-        "code": ["代號", "證券代號"],
-        "foreign": ["外資及陸資淨買股數", "外資及陸資買賣超股數"],
-        "trust": ["投信淨買股數", "投信買賣超股數"],
-        "dealer": ["自營淨買股數", "自營商買賣超股數"],
-        "total": ["三大法人買賣超股數"],
-    }
-
-    for fields, data in candidates:
-        idx = {}
-        ok = True
-        for k, names in alias.items():
-            found = next((fields.index(n) for n in names if n in fields), None)
-            if found is None:
-                ok = False
-                break
-            idx[k] = found
-        if not ok:
-            continue
-
-        rows = []
-        for r in data:
-            try:
-                code = str(r[idx["code"]]).strip()
-                if not re.fullmatch(r"\d{4}", code):
+    # Legacy schema: table[1], exact positions documented by TPEx historical response.
+    legacy_fields = [
+        "代號", "名稱", "外資及陸資買股數", "外資及陸資賣股數", "外資及陸資淨買股數",
+        "投信買進股數", "投信賣股數", "投信淨買股數", "自營淨買股數",
+        "自營商(自行買賣)買股數", "自營商(自行買賣)賣股數", "自營商(自行買賣)淨買股數",
+        "自營商(避險)買股數", "自營商(避險)賣股數", "自營商(避險)淨買股數",
+        "三大法人買賣超股數",
+    ]
+    if len(tables) > 1 and isinstance(tables[1], dict):
+        t = tables[1]
+        fields, data = t.get("fields"), t.get("data")
+        if fields == legacy_fields and isinstance(data, list):
+            rows = []
+            for r in data:
+                try:
+                    if not isinstance(r, list) or len(r) != 16:
+                        continue
+                    code = str(r[0]).strip()
+                    if not re.fullmatch(r"\d{4}", code):
+                        continue
+                    foreign, trust, dealer, total = num(r[4]), num(r[7]), num(r[8]), num(r[15])
+                    if not all(np.isfinite(x) for x in (foreign, trust, dealer)):
+                        continue
+                    rows.append({
+                        "date": f"{ymd[:4]}-{ymd[4:6]}-{ymd[6:8]}",
+                        "market": "上櫃", "code": code,
+                        "foreign_net": int(foreign), "trust_net": int(trust),
+                        "dealer_net": int(dealer),
+                        "total_net": int(total) if np.isfinite(total) else int(foreign + trust + dealer),
+                        "source": "TPEx-dailyTrade-hist",
+                    })
+                except Exception:
                     continue
-                vals = {k: num(r[idx[k]]) for k in ("foreign","trust","dealer","total")}
-                if not all(np.isfinite(vals[k]) for k in ("foreign","trust","dealer")):
+            if rows:
+                return rows
+
+    # Current schema: tables[0], 24 columns.
+    if tables and isinstance(tables[0], dict):
+        t = tables[0]
+        fields, data = t.get("fields"), t.get("data")
+        if isinstance(fields, list) and len(fields) == 24 and fields[23] == "三大法人買賣超股數合計" and isinstance(data, list):
+            rows = []
+            for r in data:
+                try:
+                    if not isinstance(r, list) or len(r) != 24:
+                        continue
+                    code = str(r[0]).strip()
+                    if not re.fullmatch(r"\d{4}", code):
+                        continue
+                    foreign, trust, dealer, total = num(r[10]), num(r[13]), num(r[22]), num(r[23])
+                    if not all(np.isfinite(x) for x in (foreign, trust, dealer)):
+                        continue
+                    rows.append({
+                        "date": f"{ymd[:4]}-{ymd[4:6]}-{ymd[6:8]}",
+                        "market": "上櫃", "code": code,
+                        "foreign_net": int(foreign), "trust_net": int(trust),
+                        "dealer_net": int(dealer),
+                        "total_net": int(total) if np.isfinite(total) else int(foreign + trust + dealer),
+                        "source": "TPEx-dailyTrade-hist",
+                    })
+                except Exception:
                     continue
-                rows.append({
-                    "date": f"{ymd[:4]}-{ymd[4:6]}-{ymd[6:8]}",
-                    "market": "上櫃",
-                    "code": code,
-                    "foreign_net": int(vals["foreign"]),
-                    "trust_net": int(vals["trust"]),
-                    "dealer_net": int(vals["dealer"]),
-                    "total_net": int(vals["total"]) if np.isfinite(vals["total"]) else int(vals["foreign"]+vals["trust"]+vals["dealer"]),
-                    "source": "TPEx-dailyTrade-hist",
-                })
-            except Exception:
-                continue
-        if rows:
-            return rows
+            if rows:
+                return rows
+
     return []
 
 
@@ -273,7 +290,9 @@ def month_shift(year: int, month: int, delta: int) -> tuple[int,int]:
 
 def update_institutional(now: datetime) -> pd.DataFrame:
     old = load_csv(INST_FILE, INST_COLUMNS)
-    if old.empty:
+    markets_present = set(old["market"].dropna().astype(str)) if not old.empty else set()
+    if old.empty or not {"上市", "上櫃"}.issubset(markets_present):
+        # Any missing market triggers a full 45-day repair backfill.
         start = now.date() - timedelta(days=45)
     else:
         latest = pd.to_datetime(old["date"], errors="coerce").max()
