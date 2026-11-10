@@ -1,4 +1,4 @@
-# Candidate Discovery Engine Web App v1.0
+# Candidate Discovery Engine Web App v1.1
 
 台股上市＋上櫃全市場候選股票發掘 Web App。
 
@@ -7,8 +7,8 @@
 - 使用者自訂股價區間
 - 上市／上櫃市場篩選
 - 流動性 Hard Gate
-- Trend / Momentum / Volume / Liquidity / Risk / Valuation 分數
-- Candidate Score 與 A/B/C/D 分級
+- Trend / Momentum / PVCS-lite Volume / Liquidity / Risk / Valuation 分數
+- Candidate Score + Risk Level + Candidate Type + A1/A2/A-R 分級
 - 候選結果 CSV 下載
 - 可選團隊存取碼
 
@@ -41,6 +41,6 @@ APP_ACCESS_CODE = "your-team-code"
 - Yahoo Finance：PoC 歷史 OHLCV
 
 ## 後續建議
-v1.1：PVCS + 法人籌碼 + 月營收
+v1.2：法人籌碼 + 月營收 + EPS/ROE/現金流
 v1.2：LightGBM Ranking + Market Regime
 v2.0：Chronos / TimesFM + Q10/Q50/Q90 + OOS Evidence
