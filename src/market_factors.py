@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from typing import Dict, Optional
+from pathlib import Path
 import math
 
 import numpy as np
@@ -11,6 +12,8 @@ TWSE_T86 = "https://www.twse.com.tw/rwd/zh/fund/T86"
 TPEX_INST = "https://www.tpex.org.tw/openapi/v1/tpex_3insti_daily_trading"
 TWSE_REVENUE = "https://openapi.twse.com.tw/v1/opendata/t187ap05_L"
 TPEX_REVENUE = "https://www.tpex.org.tw/openapi/v1/mopsfin_t187ap05_O"
+
+FACTOR_STORE_FILE = Path(__file__).resolve().parents[1] / "data" / "factor_store" / "factor_features.csv"
 
 HEADERS = {
     "User-Agent": "Mozilla/5.0 CandidateDiscoveryEngine/1.2",
@@ -246,3 +249,102 @@ def score_revenue(mom, yoy, cum_yoy):
     ys = _tanh_score(yoy, 30.0)
     cs = _tanh_score(cum_yoy, 25.0)
     return clamp(0.20 * ms + 0.50 * ys + 0.30 * cs), available / 3.0
+
+
+def load_factor_features(path: Optional[str] = None) -> pd.DataFrame:
+    """Load persisted 5D/20D institutional and 3M/6M revenue features."""
+    p = Path(path) if path else FACTOR_STORE_FILE
+    if not p.exists():
+        return pd.DataFrame()
+    try:
+        df = pd.read_csv(p, dtype={"code": str})
+        if "code" in df.columns:
+            df["code"] = df["code"].astype(str).str.zfill(4)
+        return df
+    except Exception:
+        return pd.DataFrame()
+
+
+def score_chip_history(row, daily_volume):
+    """Historical chip score using 5D/20D accumulation and buy-day persistence.
+
+    Falls back to neutral 50 if the store is incomplete.
+    """
+    obs5 = _to_float(row.get("inst_obs_5d"))
+    obs20 = _to_float(row.get("inst_obs_20d"))
+    if not np.isfinite(obs5) or obs5 < 3:
+        return 50.0, 0.0
+
+    vol = _to_float(daily_volume)
+    if not np.isfinite(vol) or vol <= 0:
+        return 50.0, 0.0
+
+    f5 = _to_float(row.get("foreign_5d"))
+    t5 = _to_float(row.get("trust_5d"))
+    total5 = _to_float(row.get("total_5d"))
+    f20 = _to_float(row.get("foreign_20d"))
+    t20 = _to_float(row.get("trust_20d"))
+    total20 = _to_float(row.get("total_20d"))
+    buy5 = _to_float(row.get("inst_buy_days_5d"))
+    buy20 = _to_float(row.get("inst_buy_days_20d"))
+
+    f5r = f5 / (vol * max(obs5, 1)) * 100 if np.isfinite(f5) else np.nan
+    t5r = t5 / (vol * max(obs5, 1)) * 100 if np.isfinite(t5) else np.nan
+    total5r = total5 / (vol * max(obs5, 1)) * 100 if np.isfinite(total5) else np.nan
+
+    denom20 = vol * max(obs20 if np.isfinite(obs20) else obs5, 1)
+    f20r = f20 / denom20 * 100 if np.isfinite(f20) else np.nan
+    t20r = t20 / denom20 * 100 if np.isfinite(t20) else np.nan
+    total20r = total20 / denom20 * 100 if np.isfinite(total20) else np.nan
+
+    s5 = (
+        0.40 * _tanh_score(f5r, 3.0) +
+        0.35 * _tanh_score(t5r, 1.5) +
+        0.25 * _tanh_score(total5r, 4.0)
+    )
+    s20 = (
+        0.40 * _tanh_score(f20r, 2.0) +
+        0.35 * _tanh_score(t20r, 1.0) +
+        0.25 * _tanh_score(total20r, 3.0)
+    )
+
+    persist5 = 50.0 if not np.isfinite(buy5) else clamp(buy5 / max(obs5, 1) * 100)
+    persist20 = 50.0
+    if np.isfinite(obs20) and obs20 >= 10 and np.isfinite(buy20):
+        persist20 = clamp(buy20 / obs20 * 100)
+
+    completeness = min(1.0, (obs5 / 5.0) * 0.4 + (min(obs20, 20) / 20.0) * 0.6) if np.isfinite(obs20) else min(1.0, obs5/5.0*0.4)
+    score = 0.45*s5 + 0.35*s20 + 0.12*persist5 + 0.08*persist20
+    return clamp(score), completeness
+
+
+def score_revenue_history(row):
+    """Revenue trend score with 3M/6M averages and acceleration."""
+    obs3 = _to_float(row.get("revenue_obs_3m"))
+    obs6 = _to_float(row.get("revenue_obs_6m"))
+    if not np.isfinite(obs3) or obs3 < 2:
+        return 50.0, 0.0
+
+    avg3 = _to_float(row.get("revenue_yoy_3m_avg"))
+    avg6 = _to_float(row.get("revenue_yoy_6m_avg"))
+    accel = _to_float(row.get("revenue_accel_3m"))
+    mom3 = _to_float(row.get("revenue_mom_3m_avg"))
+    positive6 = _to_float(row.get("revenue_positive_months_6"))
+
+    # Winsorize extreme low-base effects before mapping to scores.
+    avg3 = np.clip(avg3, -100, 100) if np.isfinite(avg3) else np.nan
+    avg6 = np.clip(avg6, -100, 100) if np.isfinite(avg6) else np.nan
+    accel = np.clip(accel, -80, 80) if np.isfinite(accel) else np.nan
+    mom3 = np.clip(mom3, -60, 60) if np.isfinite(mom3) else np.nan
+
+    s3 = _tanh_score(avg3, 30.0)
+    s6 = _tanh_score(avg6, 30.0)
+    sa = _tanh_score(accel, 20.0)
+    sm = _tanh_score(mom3, 20.0)
+    persistence = 50.0
+    if np.isfinite(obs6) and obs6 > 0 and np.isfinite(positive6):
+        persistence = clamp(positive6 / obs6 * 100)
+
+    completeness = min(1.0, (obs3/3.0)*0.45 + (min(obs6,6)/6.0)*0.55) if np.isfinite(obs6) else min(1.0, obs3/3.0*0.45)
+    score = 0.35*s3 + 0.20*s6 + 0.20*sa + 0.10*sm + 0.15*persistence
+    return clamp(score), completeness
