@@ -62,8 +62,8 @@ def cached_run_v120(universe_json, horizon, deep_scan_n, min_avg_amount, engine_
     return result
 
 
-def ensure_v11_schema(df: pd.DataFrame, horizon: str) -> pd.DataFrame:
-    """Make the UI tolerant of stale v1.0 cached DataFrames."""
+def ensure_v12_schema(df: pd.DataFrame, horizon: str) -> pd.DataFrame:
+    """Make the UI tolerant of stale cached DataFrames across upgrades."""
     if df is None or df.empty:
         return df
     out = df.copy()
@@ -127,6 +127,16 @@ def ensure_v11_schema(df: pd.DataFrame, horizon: str) -> pd.DataFrame:
             out["估值完整度%"] = out[cols].notna().sum(axis=1) / 3.0 * 100
         else:
             out["估值完整度%"] = 0.0
+
+    for col, default in [
+        ("籌碼", 50.0), ("營收動能", 50.0),
+        ("外資淨買超/成交量%", np.nan), ("投信淨買超/成交量%", np.nan),
+        ("法人合計/成交量%", np.nan), ("籌碼完整度%", 0.0),
+        ("月營收MoM%", np.nan), ("月營收YoY%", np.nan),
+        ("累計營收YoY%", np.nan), ("營收完整度%", 0.0)
+    ]:
+        if col not in out.columns:
+            out[col] = default
 
     return out
 
@@ -213,14 +223,14 @@ tab1,tab2,tab3,tab4,tab5 = st.tabs(["🏆 候選排行","⚖️ 機會×風險",
 
 result = None
 if run and not universe.empty:
-    with st.spinner("正在抓取歷史價量並計算 v1.1 候選分數…"):
+    with st.spinner("正在抓取歷史價量、法人籌碼與月營收並計算 v1.2 候選分數…"):
         result = cached_run_v120(universe.to_json(orient="split"), horizon, deep_scan_n, min_amount_m*1_000_000, "1.2.0")
-    result = ensure_v11_schema(result, horizon)
+    result = ensure_v12_schema(result, horizon)
     st.session_state["last_result"] = result
 elif "last_result" in st.session_state:
     cached_session = st.session_state["last_result"]
     if isinstance(cached_session, pd.DataFrame) and "研究優先度" in cached_session.columns:
-        result = ensure_v11_schema(cached_session, horizon)
+        result = ensure_v12_schema(cached_session, horizon)
     else:
         st.session_state.pop("last_result", None)
 
