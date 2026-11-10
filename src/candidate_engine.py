@@ -7,31 +7,33 @@ import pandas as pd
 import requests
 import yfinance as yf
 
+from src.market_factors import score_chip, score_revenue
+
 TWSE_DAILY = "https://openapi.twse.com.tw/v1/exchangeReport/STOCK_DAY_ALL"
 TWSE_VAL = "https://openapi.twse.com.tw/v1/exchangeReport/BWIBBU_ALL"
 TPEX_DAILY = "https://www.tpex.org.tw/openapi/v1/tpex_mainboard_daily_close_quotes"
 TPEX_VAL = "https://www.tpex.org.tw/openapi/v1/tpex_mainboard_peratio_analysis"
 
 HEADERS = {
-    "User-Agent": "Mozilla/5.0 CandidateDiscoveryEngine/1.1",
+    "User-Agent": "Mozilla/5.0 CandidateDiscoveryEngine/1.2",
     "Accept": "application/json,text/plain,*/*",
 }
 
 HORIZON_CFG = {
     "短期（5～20交易日）": {
         "period": "6mo",
-        "weights": {"trend": 25, "momentum": 25, "volume": 20, "liquidity": 15, "risk": 15, "valuation": 0},
+        "weights": {"trend": 20, "momentum": 20, "volume": 18, "chip": 17, "revenue": 5, "liquidity": 8, "risk": 12, "valuation": 0},
         "desc": "偏重趨勢、動能與價量，適合約 1～4 週候選發掘。",
     },
     "中期（20～60交易日）": {
         "period": "1y",
-        "weights": {"trend": 30, "momentum": 20, "volume": 15, "liquidity": 10, "risk": 15, "valuation": 10},
+        "weights": {"trend": 24, "momentum": 15, "volume": 12, "chip": 15, "revenue": 12, "liquidity": 7, "risk": 10, "valuation": 5},
         "desc": "提高趨勢持續性與風險控制，適合約 1～3 個月。",
     },
     "長期（60～250交易日）": {
         "period": "2y",
-        "weights": {"trend": 35, "momentum": 15, "volume": 10, "liquidity": 10, "risk": 15, "valuation": 15},
-        "desc": "v1.1 為技術＋流動性＋風險＋估值初篩；基本面品質將於後續版加入。",
+        "weights": {"trend": 20, "momentum": 8, "volume": 7, "chip": 8, "revenue": 22, "liquidity": 5, "risk": 10, "valuation": 20},
+        "desc": "v1.2 提高月營收與估值權重，作為長期候選的基本面動能初篩。",
     },
 }
 
@@ -502,8 +504,18 @@ def run_engine(universe: pd.DataFrame, horizon: str, deep_scan_n: int, min_avg_a
         yld = row.get("yield_pct", np.nan)
         valuation, valuation_raw, completeness = score_valuation(pe, pb, yld)
 
+        chip_score, foreign_ratio, trust_ratio, inst_total_ratio, chip_complete = score_chip(
+            row.get("foreign_net", np.nan), row.get("trust_net", np.nan),
+            row.get("inst_total_net", np.nan), row.get("volume", np.nan)
+        )
+        revenue_score, revenue_complete = score_revenue(
+            row.get("revenue_mom_pct", np.nan), row.get("revenue_yoy_pct", np.nan),
+            row.get("revenue_cum_yoy_pct", np.nan)
+        )
+
         total = (
             trend*weights["trend"] + momentum*weights["momentum"] + volume*weights["volume"] +
+            chip_score*weights["chip"] + revenue_score*weights["revenue"] +
             liquidity*weights["liquidity"] + risk_score*weights["risk"] + valuation*weights["valuation"]
         ) / max(1, sum(weights.values()))
 
@@ -515,7 +527,16 @@ def run_engine(universe: pd.DataFrame, horizon: str, deep_scan_n: int, min_avg_a
             "候選分數": round(total, 1), "候選等級": grade(total),
             "研究優先度": priority, "風險等級": risk, "候選型態": ctype,
             "趨勢": round(trend, 1), "動能": round(momentum, 1), "價量": round(volume, 1),
+            "籌碼": round(chip_score, 1), "營收動能": round(revenue_score, 1),
             "流動性": round(liquidity, 1), "風險": round(risk_score, 1), "估值": round(valuation, 1),
+            "外資淨買超/成交量%": None if not np.isfinite(foreign_ratio) else round(foreign_ratio, 2),
+            "投信淨買超/成交量%": None if not np.isfinite(trust_ratio) else round(trust_ratio, 2),
+            "法人合計/成交量%": None if not np.isfinite(inst_total_ratio) else round(inst_total_ratio, 2),
+            "籌碼完整度%": round(chip_complete*100, 0),
+            "月營收MoM%": None if not np.isfinite(row.get("revenue_mom_pct", np.nan)) else round(float(row.get("revenue_mom_pct")), 2),
+            "月營收YoY%": None if not np.isfinite(row.get("revenue_yoy_pct", np.nan)) else round(float(row.get("revenue_yoy_pct")), 2),
+            "累計營收YoY%": None if not np.isfinite(row.get("revenue_cum_yoy_pct", np.nan)) else round(float(row.get("revenue_cum_yoy_pct")), 2),
+            "營收完整度%": round(revenue_complete*100, 0),
             "估值原始分": round(valuation_raw, 1), "估值完整度%": round(completeness*100, 0),
             "ROC5%": round(f["roc5"], 2), "ROC20%": round(f["roc20"], 2), "ROC60%": round(f["roc60"], 2),
             "RSI14": round(f["rsi14"], 1), "RVOL5/20": round(f["rvol5"], 2),
