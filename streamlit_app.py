@@ -9,10 +9,11 @@ import pandas as pd
 import streamlit as st
 
 from src.candidate_engine import HORIZON_CFG, load_market_snapshot, load_valuation, run_engine
+from src.market_factors import load_institutional_snapshot, load_revenue_snapshot
 
 st.set_page_config(page_title="Candidate Discovery Engine", page_icon="📈", layout="wide", initial_sidebar_state="expanded")
 
-APP_BUILD = "1.1.2"
+APP_BUILD = "1.2.0"
 if st.session_state.get("_app_build") != APP_BUILD:
     st.cache_data.clear()
     st.session_state.pop("last_result", None)
@@ -46,7 +47,15 @@ def cached_valuation():
     return load_valuation()
 
 @st.cache_data(ttl=1800, show_spinner=False)
-def cached_run_v112(universe_json, horizon, deep_scan_n, min_avg_amount, engine_version="1.1.2"):
+def cached_institutional(latest_market_date):
+    return load_institutional_snapshot(latest_market_date)
+
+@st.cache_data(ttl=21600, show_spinner=False)
+def cached_revenue():
+    return load_revenue_snapshot()
+
+@st.cache_data(ttl=1800, show_spinner=False)
+def cached_run_v120(universe_json, horizon, deep_scan_n, min_avg_amount, engine_version="1.2.0"):
     """Versioned cache key prevents old v1.0 DataFrames from surviving engine upgrades."""
     universe = pd.read_json(StringIO(universe_json), orient="split")
     result, _ = run_engine(universe, horizon, deep_scan_n, min_avg_amount)
@@ -122,7 +131,7 @@ def ensure_v11_schema(df: pd.DataFrame, horizon: str) -> pd.DataFrame:
     return out
 
 st.title("📈 全市場 Candidate Discovery Engine")
-st.caption("Web App v1.1｜TWSE＋TPEx｜機會分數 × 風險分級 × 候選型態｜研究排序工具")
+st.caption("Web App v1.2｜技術 × 價量 × 法人籌碼 × 月營收 × 風險｜研究排序工具")
 
 with st.sidebar:
     st.header("候選篩選條件")
@@ -160,6 +169,25 @@ else:
     snapshot["pb"] = np.nan
     snapshot["yield_pct"] = np.nan
 
+latest_raw_date = ""
+if "date" in snapshot.columns and not snapshot.empty:
+    latest_raw_date = str(snapshot["date"].dropna().astype(str).iloc[0])
+
+inst = cached_institutional(latest_raw_date)
+rev = cached_revenue()
+
+if not inst.empty:
+    snapshot = snapshot.merge(inst, on=["market","code"], how="left")
+else:
+    for col in ["foreign_net","trust_net","dealer_net","inst_total_net","inst_date","inst_source"]:
+        snapshot[col] = np.nan
+
+if not rev.empty:
+    snapshot = snapshot.merge(rev, on=["market","code"], how="left")
+else:
+    for col in ["revenue_period","revenue_current_thousand","revenue_mom_pct","revenue_yoy_pct","revenue_cum_yoy_pct","revenue_source"]:
+        snapshot[col] = np.nan
+
 date_col = "date_display" if "date_display" in snapshot.columns else "date"
 market_dates = "、".join([x for x in sorted(set(snapshot[date_col].astype(str))) if x][:3])
 
@@ -186,7 +214,7 @@ tab1,tab2,tab3,tab4,tab5 = st.tabs(["🏆 候選排行","⚖️ 機會×風險",
 result = None
 if run and not universe.empty:
     with st.spinner("正在抓取歷史價量並計算 v1.1 候選分數…"):
-        result = cached_run_v112(universe.to_json(orient="split"), horizon, deep_scan_n, min_amount_m*1_000_000, "1.1.2")
+        result = cached_run_v120(universe.to_json(orient="split"), horizon, deep_scan_n, min_amount_m*1_000_000, "1.2.0")
     result = ensure_v11_schema(result, horizon)
     st.session_state["last_result"] = result
 elif "last_result" in st.session_state:
@@ -213,7 +241,7 @@ with tab1:
         d.metric("A-R 高風險", f"{(result['研究優先度']=='A-R｜高風險候選').sum()} 檔")
         e.metric("B級候選", f"{result['研究優先度'].str.startswith('B').sum()} 檔")
 
-        cols = ["排名","市場","代碼","名稱","現價","候選分數","研究優先度","風險等級","候選型態","趨勢","動能","價量","流動性","風險","估值","ROC20%","RSI14","RVOL5/20","ATR14%","60D最大回撤%","估值完整度%","20D日均成交金額(百萬)"]
+        cols = ["排名","市場","代碼","名稱","現價","候選分數","研究優先度","風險等級","候選型態","趨勢","動能","價量","籌碼","營收動能","流動性","風險","估值","外資淨買超/成交量%","投信淨買超/成交量%","月營收YoY%","累計營收YoY%","ROC20%","RSI14","RVOL5/20","ATR14%","60D最大回撤%","20D日均成交金額(百萬)"]
         st.dataframe(filtered[cols], hide_index=True, use_container_width=True)
 
         st.download_button("⬇️ 下載完整候選 CSV", result.to_csv(index=False).encode("utf-8-sig"),
@@ -239,7 +267,7 @@ with tab2:
 with tab3:
     st.subheader("Candidate Score 結構")
     weights = HORIZON_CFG[horizon]["weights"]
-    name_map = {"trend":"趨勢","momentum":"動能","volume":"價量","liquidity":"流動性","risk":"風險","valuation":"估值"}
+    name_map = {"trend":"趨勢","momentum":"動能","volume":"價量","chip":"籌碼","revenue":"營收","liquidity":"流動性","risk":"風險","valuation":"估值"}
     wdf = pd.DataFrame([{"因子":name_map[k],"權重%":v} for k,v in weights.items()])
     st.bar_chart(wdf.set_index("因子"), horizontal=True)
     st.dataframe(wdf, hide_index=True, use_container_width=True)
@@ -250,7 +278,7 @@ with tab4:
     st.markdown("""
 - **Trend v1.1**：連續評分，使用 Price/MA20、MA5/MA20、MA20/MA60、MA60/MA120、斜率與 ROC。
 - **Momentum**：ROC5 / ROC20 / ROC60、RSI14。
-- **PVCS-lite 價量**：RVOL5/20 + OBV20 Balance + 20D 漲跌量比。
+- **PVCS-lite 價量**：RVOL5/20 + OBV20 Balance + 20D 漲跌量比。\n- **法人籌碼 v1.2**：最新交易日外資／投信／三大法人買賣超，並以當日成交量正規化。\n- **月營收 v1.2**：最新月營收 MoM / YoY / 累計 YoY。
 - **Risk**：ATR14%、60D 最大回撤，另產生 Low / Medium / High / Extreme。
 - **Valuation**：PE、PB、殖利率 + Data Completeness。
 - **Candidate Type**：穩健趨勢、動能突破、價量轉強、防守型、高風險動能、綜合型。
@@ -263,8 +291,8 @@ with tab5:
 - 歷史 OHLCV：Yahoo Finance。
 - 日期顯示：v1.1 已將民國日期轉成西元 YYYY-MM-DD。
 - 用途：研究候選排序，不是買進訊號。
-- 下一階段：法人籌碼、月營收、EPS Growth、ROE、現金流、產業相對估值。
+- v1.2 已加入最新法人籌碼與月營收動能；下一階段建立法人 5D/20D 歷史累積、EPS Growth、ROE、現金流與產業相對估值。
 """)
 
 st.divider()
-st.caption("Candidate Discovery Engine Web App v1.1｜Opportunity × Risk｜建議持續以 Walk-Forward / OOS Evidence 校準。")
+st.caption("Candidate Discovery Engine Web App v1.2｜Technical × Chip × Revenue × Risk｜建議持續以 Walk-Forward / OOS Evidence 校準。")
