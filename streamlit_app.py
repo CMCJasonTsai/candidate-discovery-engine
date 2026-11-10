@@ -40,7 +40,8 @@ def cached_valuation():
     return load_valuation()
 
 @st.cache_data(ttl=1800, show_spinner=False)
-def cached_run(universe_json, horizon, deep_scan_n, min_avg_amount):
+def cached_run_v11(universe_json, horizon, deep_scan_n, min_avg_amount, engine_version="1.1.1"):
+    """Versioned cache key prevents old v1.0 DataFrames from surviving engine upgrades."""
     universe = pd.read_json(StringIO(universe_json), orient="split")
     result, _ = run_engine(universe, horizon, deep_scan_n, min_avg_amount)
     return result
@@ -110,10 +111,14 @@ tab1,tab2,tab3,tab4,tab5 = st.tabs(["🏆 候選排行","⚖️ 機會×風險",
 result = None
 if run and not universe.empty:
     with st.spinner("正在抓取歷史價量並計算 v1.1 候選分數…"):
-        result = cached_run(universe.to_json(orient="split"), horizon, deep_scan_n, min_amount_m*1_000_000)
+        result = cached_run_v11(universe.to_json(orient="split"), horizon, deep_scan_n, min_amount_m*1_000_000, "1.1.1")
     st.session_state["last_result"] = result
 elif "last_result" in st.session_state:
-    result = st.session_state["last_result"]
+    cached_session = st.session_state["last_result"]
+    if isinstance(cached_session, pd.DataFrame) and "研究優先度" in cached_session.columns:
+        result = cached_session
+    else:
+        st.session_state.pop("last_result", None)
 
 with tab1:
     if universe.empty:
