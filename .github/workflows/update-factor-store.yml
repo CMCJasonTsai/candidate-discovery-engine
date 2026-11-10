@@ -1,0 +1,41 @@
+name: Update Factor Store
+
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: "30 10 * * 1-5"
+
+permissions:
+  contents: write
+
+jobs:
+  update-factor-store:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+
+      - name: Update historical factor store
+        run: python scripts/update_factor_store.py
+
+      - name: Commit updated factor store
+        run: |
+          git config user.name "candidate-factor-bot"
+          git config user.email "candidate-factor-bot@users.noreply.github.com"
+          git add data/factor_store
+          if git diff --cached --quiet; then
+            echo "No factor-store changes."
+          else
+            git commit -m "Update historical factor store"
+            git push
+          fi
